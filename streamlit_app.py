@@ -107,58 +107,92 @@ st.markdown(
 colA, colB = st.columns([1, 1])
 
 with colA:
-    st.subheader("① ベース地域 & 対象地域")
-    base_region = st.selectbox(
-        "Base (通常は NCR)",
-        options=list(DEFAULT_FIES_2023P.keys()),
-        index=list(DEFAULT_FIES_2023P.keys()).index("National Capital Region (NCR)")
-    )
-    target_region = st.selectbox(
-        "Target",
-        options=list(DEFAULT_FIES_2023P.keys()),
-        index=list(DEFAULT_FIES_2023P.keys()).index("Region XI - Davao Region")
-    )
+    st.subheader("④ 係数計算")
 
-with colB:
-    st.subheader("② 重み（合計=1に正規化されます）")
-    w1 = st.number_input("Weight: Minimum Wage", min_value=0.0, max_value=1.0, value=0.30, step=0.05)
-    w2 = st.number_input("Weight: FIES (Expenditure)", min_value=0.0, max_value=1.0, value=0.50, step=0.05)
-    w3 = st.number_input("Weight: CPI", min_value=0.0, max_value=1.0, value=0.20, step=0.05)
-    w1n, w2n, w3n = normalize_weights(w1, w2, w3)
-    st.caption(f"Normalized weights → Wage={w1n:.2f}, FIES={w2n:.2f}, CPI={w3n:.2f}")
+def lookup_value(df: pd.DataFrame, region: str, col: str):
+    if df is None:
+        return None
+    m = df.loc[df["Region"] == region, col]
+    if len(m) == 0:
+        return None
+    return float(m.iloc[0])
 
-st.divider()
+# --- MW / FIES の取得 ---
+mw_base = lookup_value(mw_df, base_region, "Daily_Min_Wage") if mw_df is not None else None
+mw_target = lookup_value(mw_df, target_region, "Daily_Min_Wage") if mw_df is not None else None
 
-st.subheader("③ 入力データ（最低賃金 / FIES / CPI）")
+f_base = lookup_value(fies_df, base_region, "Annual_Expenditure_kPHP") if fies_df is not None else None
+f_target = lookup_value(fies_df, target_region, "Annual_Expenditure_kPHP") if fies_df is not None else None
 
-tab1, tab2, tab3 = st.tabs(["最低賃金 (MW)", "FIES支出", "CPI (OpenSTAT)"])
+# --- CPI の取得（CPIが取れてなくても暫定で1.0扱いにする）---
+# cpi_base_val / cpi_target_val が None の場合は中立(=1.0)として扱う
+if cpi_base_val is None or cpi_target_val is None:
+    cpi_base_val = 1.0
+    cpi_target_val = 1.0
+    st.info("CPIが未取得のため、暫定で CPIIndex=1.0（中立）として計算しています。")
 
-with tab1:
-    st.write("NWPCの最低賃金（Non-Agriculture日額）を入力/CSVで管理します。[1](https://nwpc.dole.gov.ph/ncr/)[2](https://newsinfo.inquirer.net/1672715/tougher-days-ahead-household-income-spending-falling)")
-    mode_mw = st.radio("入力方法", ["デフォルト（簡易）", "手入力", "CSVアップロード"], horizontal=True)
+# --- 計算に必要な最小条件（MWとFIESさえあれば計算できる）---
+missing = []
+if mw_base is None: missing.append(f"最低賃金（Base: {base_region}）")
+if mw_target is None: missing.append(f"最低賃金（Target: {target_region}）")
+if f_base is None: missing.append(f"FIES支出（Base: {base_region}）")
+if f_target is None: missing.append(f"FIES支出（Target: {target_region}）")
 
-    mw_df = None
-    if mode_mw == "デフォルト（簡易）":
-        mw_df = pd.DataFrame([{"Region": k, "Daily_Min_Wage": v} for k, v in DEFAULT_MIN_WAGE.items()])
-        st.dataframe(mw_df, use_container_width=True)
+if missing:
+    st.error("データが不足しています：\n- " + "\n- ".join(missing))
+    st.stop()
 
-    elif mode_mw == "手入力":
-        mw_base = st.number_input(f"{base_region} 日額", value=float(DEFAULT_MIN_WAGE.get(base_region, 695.0)))
-        mw_target = st.number_input(f"{target_region} 日額", value=float(DEFAULT_MIN_WAGE.get(target_region, 525.0)))
-        mw_df = pd.DataFrame([
-            {"Region": base_region, "Daily_Min_Wage": mw_base},
-            {"Region": target_region, "Daily_Min_Wage": mw_target},
-        ])
-        st.dataframe(mw_df, use_container_width=True)
+# --- 指数 ---
+wage_index = mw_target / mw_base
+fies_index = f_target / f_base
+cpi_index = cpi_target_val / cpi_base_val
 
-    else:
-        up = st.file_uploader("MW CSV（列: Region, Daily_Min_Wage）", type=["csv"])
-        if up:
-            mw_df = pd.read_csv(up)
-            st.dataframe(mw_df, use_container_width=True)
-        else:
-            st.info("CSVをアップロードしてください。")
+# --- 係数 ---
+factor = w1n * wage_index + w2n * fies_index + w3n * cpi_index
 
-with tab2:
-    st.write("PSA FIESの平均年間支出（2023p）をデフォルト搭載。必要ならCSVで差し替え可能。[3](https://www.humanresourcesonline.net/wage-hikes-expected-for-more-than-132-000-minimum-wage-workers-in-the-philippines-in-2024)")
-   
+col1, col2, col3, col4 = st.columns(4)
+col1.metric("WageIndex", f"{wage_index:.4f}")
+col2.metric("FIESIndex", f"{fies_index:.4f}")
+col3.metric("CPIIndex", f"{cpi_index:.4f}")
+col4.metric("RegionalFactor", f"{factor:.4f}")
+
+st.markdown("### ⑤ 換算（マニラ賃金→地域賃金）")
+salary_mode = st.radio("賃金入力単位", ["月給", "年収(13th含む想定)"], horizontal=True)
+
+base_low = st.number_input("Baseレンジ下限", min_value=0.0, value=30000.0, step=1000.0)
+base_high = st.number_input("Baseレンジ上限", min_value=0.0, value=40000.0, step=1000.0)
+
+target_low = base_low * factor
+target_high = base_high * factor
+
+st.success(f"Targetレンジ（{salary_mode}）: {target_low:,.0f} 〜 {target_high:,.0f}")
+
+out = pd.DataFrame([{
+    "base_region": base_region,
+    "target_region": target_region,
+    "mw_base": mw_base,
+    "mw_target": mw_target,
+    "wage_index": wage_index,
+    "fies_base_kphp": f_base,
+    "fies_target_kphp": f_target,
+    "fies_index": fies_index,
+    "cpi_base": cpi_base_val,
+    "cpi_target": cpi_target_val,
+    "cpi_index": cpi_index,
+    "wage_weight": w1n,
+    "fies_weight": w2n,
+    "cpi_weight": w3n,
+    "regional_factor": factor,
+    "base_low": base_low,
+    "base_high": base_high,
+    "target_low": target_low,
+    "target_high": target_high,
+}])
+
+st.download_button(
+    "結果をCSVでダウンロード",
+    data=out.to_csv(index=False).encode("utf-8-sig"),
+    file_name="regional_factor_result.csv",
+    mime="text/csv"
+)
+``
