@@ -195,4 +195,3 @@ st.download_button(
     file_name="regional_factor_result.csv",
     mime="text/csv"
 )
-``
